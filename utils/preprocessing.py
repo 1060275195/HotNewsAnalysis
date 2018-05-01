@@ -8,6 +8,11 @@ import json
 from datetime import datetime
 from datetime import timedelta
 
+try:
+    jieba.enable_parallel(4)
+except NotImplementedError:
+    pass
+
 
 def data_filter(df):
     """数据过滤"""
@@ -32,9 +37,12 @@ def get_data(df, last_time, delta):
     delta = timedelta(delta)
     df['time'] = df['time'].map(lambda x: datetime.strptime(x, '%Y-%m-%d %H:%M'))
     df = df[df['time'].map(lambda x: (x <= last_time) and (x > last_time - delta))].copy()
+    if df.shape[0] == 0:
+        print('无该事件段的数据！')
     df = df.sort_values(by=['time'], ascending=[0])
     df['time'] = df['time'].map(lambda x: datetime.strftime(x, '%Y-%m-%d %H:%M'))
     df = df.reset_index(drop=True)
+    print('df.shape=', df.shape)
     return df
 
 
@@ -45,7 +53,7 @@ def clean_title(title):
     title = re.sub(r'( *\n+)+', '\n', title)
     title = re.sub(r'\u3000', '', title)
     # 清理…和|
-    title = re.sub(r'…|\|', ' ', title)
+    title = re.sub(r'[…|]', ' ', title)
     # 中文繁体转简体
     # x = opencc.OpenCC('t2s').convert(x)
     # 英文大写转小写
@@ -60,9 +68,9 @@ def clean_content(content):
     content = re.sub(r'( *\n+)+', '\n', content)
     content = re.sub(r'\u3000', '', content)
     # 清理责任编辑
-    content = content.split('\n责任编辑')[0]
-    content = content.split('返回搜狐，查看更多')[0]
-    # 清理原标题等
+    content = re.split(r'\n责任编辑', content)[0]
+    content = re.split(r'返回搜狐，查看更多', content)[0]
+    # 清理原标题等和内容无关的文字
     list1 = ['原标题', '新浪财经讯[ ，]', '新浪美股讯[ ，]', '新浪外汇讯[ ，]', '新浪科技讯[ ，]',
              r'[（\(].{,20}来源[:：].{,30}[）\)]',
              r'(文章|图片|数据|资料)来源[:：].{,30}\n',
@@ -80,37 +88,51 @@ def clean_content(content):
     return content
 
 
-def get_num_eng_ch(text):
-    # 提取数字英文中文
+def get_num_en_ch(text):
+    """提取数字英文中文"""
     text = re.sub(r'[^0-9A-Za-z\u4E00-\u9FFF]+', ' ', text)
     text = text.strip()
     return text
 
 
-def pseg_cut(content, userdict_path=None):
-    """词性标注"""
+def pseg_cut(text, userdict_path=None):
+    """
+    词性标注
+    :param text: string，原文本数据
+    :param userdict_path: string，用户词词典路径，默认为None
+    :return: list， 分词后词性标注的列表
+    """
     if userdict_path is not None:
         jieba.load_userdict(userdict_path)
-    words = pseg.lcut(content)
+    words = pseg.lcut(text)
     return words
 
 
 def get_words_by_flags(words, flags=None):
-    """获取指定词性的词"""
+    """
+    获取指定词性的词
+    :param words: list， 分词后词性标注的列表
+    :param flags: list， 词性标注，默认为提取名词和动词
+    :return: list， 指定词性的词
+    """
     flags = ['n.*', 'v.*'] if flags is None else flags
     words = [w for w, f in words if w != ' ' and re.match('|'.join(['(%s$)' % flag for flag in flags]), f)]
     return words
 
 
-def userdict_cut(x, userdict_path):
-    # 用户词词典
-    jieba.load_userdict(userdict_path)
-    words = jieba.cut(x)
+def userdict_cut(text, userdict_path=None):
+    """
+    对文本进行jieba分词
+    如果使用用户词词典，那么利用用户词词典进行jieba分词
+    """
+    if userdict_path is not None:
+        jieba.load_userdict(userdict_path)
+    words = jieba.cut(text)
     return words
 
 
 def stop_words_cut(words, stop_words_path):
-    # 停用词处理
+    """停用词处理"""
     with open(stop_words_path, 'r', encoding='utf-8') as f:
         stopwords = [line.strip() for line in f.readlines()]
         stopwords.append(' ')
@@ -119,7 +141,7 @@ def stop_words_cut(words, stop_words_path):
 
 
 def disambiguation_cut(words, disambiguation_dict_path):
-    # 消歧词典
+    """消歧词典"""
     with open(disambiguation_dict_path, 'r', encoding='utf-8') as f:
         disambiguation_dict = json.load(f)
         words = [(disambiguation_dict[word]
@@ -128,7 +150,7 @@ def disambiguation_cut(words, disambiguation_dict_path):
 
 
 def individual_character_cut(words, individual_character_dict_path):
-    # 删除无用单字
+    """删除无用单字"""
     with open(individual_character_dict_path, 'r', encoding='utf-8') as f:
         individual_character = [line.strip() for line in f.readlines()]
         words = [word for word in words

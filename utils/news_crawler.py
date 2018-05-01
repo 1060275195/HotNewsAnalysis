@@ -9,6 +9,12 @@ from random import randint
 from datetime import datetime
 import pandas as pd
 
+# 测试所需模块
+import os
+import time
+import threading
+import multiprocessing
+
 LATEST_COLS = ['title', 'time', 'url']
 LATEST_COLS_C = ['title', 'time', 'url', 'content']
 
@@ -172,7 +178,6 @@ def get_xinhuanet_latest_news(template_url, top=80, show_content=False):
 def save_news(news_df, path):
     """保存新闻"""
     news_df.to_csv(path, index=False, encoding='gb18030')
-    # news_df.to_csv(path, index=False)
 
 
 def replace_line_terminator(x):
@@ -192,30 +197,40 @@ def load_news(path):
 
 
 """-------------------------测试代码-------------------------"""
-import os
-import time
-import threading
-import multiprocessing
-filedir_path = os.path.dirname(os.path.realpath(__file__))
-news_path = os.path.join(os.path.dirname(filedir_path), 'data', 'news')
+
+file_dir_path = os.path.dirname(os.path.realpath(__file__))  # 当前文件所在目录路径
+news_path = os.path.join(os.path.dirname(file_dir_path), 'data', 'news')  # 新闻存储的目录路径
 
 
 def sina_crawler():
+    """
+    新浪爬虫
+    爬取最新的1000条新浪新闻，并保存在news目录下
+    """
     sina_news_df = get_latest_news('sina', top=1000, show_content=True)
     save_news(sina_news_df, os.path.join(news_path, 'sina_latest_news.csv'))
 
 
 def sohu_crawler():
+    """
+    搜狐爬虫
+    爬取最新的1000条搜狐新闻，并保存在news目录下
+    """
     sohu_news_df = get_latest_news('sohu', top=1000, show_content=True)
     save_news(sohu_news_df, os.path.join(news_path, 'sohu_latest_news.csv'))
 
 
 def xinhuanet_crawler():
+    """
+    新华网爬虫
+    爬取最新的100条新华网新闻，并保存在news目录下
+    """
     xinhuanet_news_df = get_latest_news('xinhuanet', top=100, show_content=True)
     save_news(xinhuanet_news_df, os.path.join(news_path, 'xinhuanet_latest_news.csv'))
 
 
 def threaded_crawler():
+    """多线程爬虫"""
     thread1 = threading.Thread(target=sina_crawler)
     thread2 = threading.Thread(target=sohu_crawler)
     thread3 = threading.Thread(target=xinhuanet_crawler)
@@ -235,6 +250,7 @@ def threaded_crawler():
 
 
 def process_crawler():
+    """多进程爬虫"""
     p1 = multiprocessing.Process(target=sina_crawler)
     p2 = multiprocessing.Process(target=sohu_crawler)
     p3 = multiprocessing.Process(target=xinhuanet_crawler)

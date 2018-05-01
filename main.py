@@ -6,6 +6,9 @@ from datetime import datetime
 from utils import news_crawler
 from utils import preprocessing
 from utils import modeling
+from utils import counter
+
+import multiprocessing
 
 # 获取项目路径
 project_path = os.path.dirname(os.path.realpath(__file__))
@@ -49,120 +52,171 @@ def filter_data(news_df):
     return df
 
 
-def title_preprocess(df):
-    """标题分词预处理"""
-    df['title1'] = df['title'].map(lambda x: preprocessing.clean_title(x))
-    df['title1'] = df['title1'].map(lambda x: preprocessing.get_num_eng_ch(x))
-    df['title1'] = df['title1'].map(lambda x: preprocessing.pseg_cut(
+def title_preprocess(df_title):
+    """标题分词处理"""
+    df_title['title_'] = df_title['title'].map(lambda x: preprocessing.clean_title(x))
+    df_title['title_'] = df_title['title_'].map(lambda x: preprocessing.get_num_en_ch(x))
+    df_title['title_cut'] = df_title['title_'].map(lambda x: preprocessing.pseg_cut(
         x, userdict_path=os.path.join(extra_dict_path, 'self_userdict.txt')))
-    df['title_cut'] = df['title1'].map(lambda x: preprocessing.get_words_by_flags(
-        x, flags=['n.*', '.*n', 'v.*', 't', 's', 'j', 'l', 'i', 'eng']))
-    df['title_cut'] = df['title_cut'].map(lambda x: preprocessing.stop_words_cut(
+    df_title['title_cut'] = df_title['title_cut'].map(lambda x: preprocessing.get_words_by_flags(
+        x, flags=['n.*', '.*n', 'v.*', 's', 'j', 'l', 'i', 'eng']))
+    df_title['title_cut'] = df_title['title_cut'].map(lambda x: preprocessing.stop_words_cut(
         x, os.path.join(extra_dict_path, 'HIT_stop_words.txt')))
-    df['title_cut'] = df['title_cut'].map(lambda x: preprocessing.stop_words_cut(
+    df_title['title_cut'] = df_title['title_cut'].map(lambda x: preprocessing.stop_words_cut(
         x, os.path.join(extra_dict_path, 'self_stop_words.txt')))
-    df['title_cut'] = df['title_cut'].map(lambda x: preprocessing.disambiguation_cut(
+    df_title['title_cut'] = df_title['title_cut'].map(lambda x: preprocessing.disambiguation_cut(
         x, os.path.join(extra_dict_path, 'self_disambiguation_dict.json')))
-    return df
+    df_title['title_cut'] = df_title['title_cut'].map(lambda x: preprocessing.individual_character_cut(
+        x, os.path.join(extra_dict_path, 'self_individual_character_dict.txt')))
+    df_title['title_'] = df_title['title_cut'].map(lambda x: ' '.join(x))
+    return df_title
 
 
-def title_cluster(df, save=False):
-    df = title_preprocess(df)
-    matrix = modeling.feature_extraction(df['title_cut'], vectorizer='CountVectorizer',
-                                         vec_args={'max_df': 1.0, 'min_df': 1})
-    dbscan = modeling.get_cluster(matrix, cluster='DBSCAN',
-                                  cluster_args={'eps': 0.5, 'min_samples': 5, 'metric': 'cosine'})
+def title_cluster(df, save_df=False):
+    """按新闻标题聚类"""
+    df_title = df.copy()
+    df_title = title_preprocess(df_title)
+    word_library_list = counter.get_word_library(df_title['title_cut'])
+    single_frequency_words_list = counter.get_single_frequency_words(df_title['title_cut'])
+    max_features = len(word_library_list) - len(single_frequency_words_list) // 2
+    title_matrix = modeling.feature_extraction(df_title['title_'], vectorizer='CountVectorizer',
+                                               vec_args={'max_df': 1.0, 'min_df': 1, 'max_features': max_features})
+    title_dbscan = modeling.get_cluster(title_matrix, cluster='DBSCAN',
+                                        cluster_args={'eps': 0.4, 'min_samples': 4, 'metric': 'cosine'})
+    title_labels = modeling.get_labels(title_dbscan)
+    df_title['title_label'] = title_labels
+    df_non_outliers = modeling.get_non_outliers_data(df_title, label_column='title_label')
+    title_label_num = counter.get_num_of_value_no_repeat(df_non_outliers['title_label'].tolist())
+    print('按新闻标题聚类，一共有%d个簇(不包括离群点)' % title_label_num)
+    title_rank = modeling.label2rank(title_labels)
+    df_title['title_rank'] = title_rank
+    for i in range(1, title_label_num + 1):
+        df_ = df_title[df_title['title_rank'] == i]
+        title_top_list = counter.get_most_common_words(df_['title_cut'], top_n=10)
+        print(title_top_list)
+    if save_df:
+        df_title.drop(['content', 'title_', 'title_label'], axis=1, inplace=True)
+        news_crawler.save_news(df_title, os.path.join(results_path, 'df_title_rank.csv'))
+    return df_title
 
-    labels = modeling.get_labels(dbscan)
-    df['title_label'] = labels
-    df_non_outliers = modeling.get_non_outliers_data(df, label_column='title_label')
-    labelnum = modeling.get_labelnum(df_non_outliers['title_label'].tolist())
-    print('一共有%d个簇(不包括离群点)' % labelnum)
-    title_rank = modeling.label2rank(labels)
-    df['title_rank'] = title_rank
-    for i in range(labelnum):
-        df1 = df[df['title_rank'] == i+1]
-        list1 = modeling.flat(df1['title_cut'].tolist())
-        modeling.list2wordcloud(list1, save_path=os.path.join(results_path, 'title_ranks', '%d.png' % (i+1)),
-                                font_path=os.path.join(fonts_path, '禹卫书法行书简体.ttf'))
-        top_list = modeling.get_most_common(df1['title_cut'], n=15)
-        print(top_list)
-    if save:
-        df.drop(['content', 'title1', 'title_cut', 'title_label'], axis=1, inplace=True)
-        news_crawler.save_news(df, os.path.join(results_path, 'df_title_rank.csv'))
-    return df
 
-
-def content_preprocess(df):
-    """新闻内容分词预处理"""
-    df['content1'] = df['content'].map(lambda x: preprocessing.clean_content(x))
-    df['content1'] = df['content1'].map(lambda x: preprocessing.get_num_eng_ch(x))
-    df['content1'] = df['content1'].map(lambda x: preprocessing.pseg_cut(
+def content_preprocess(df_content):
+    """新闻内容分词处理"""
+    df_content['content_'] = df_content['content'].map(lambda x: preprocessing.clean_content(x))
+    df_content['content_'] = df_content['content_'].map(lambda x: preprocessing.get_num_en_ch(x))
+    df_content['content_cut'] = df_content['content_'].map(lambda x: preprocessing.pseg_cut(
         x, userdict_path=os.path.join(extra_dict_path, 'self_userdict.txt')))
-    df['content_cut'] = df['content1'].map(lambda x: preprocessing.get_words_by_flags(
-        x, flags=['n.*', '.*n', 'v.*', 't', 's', 'j', 'l', 'i', 'eng']))
-    df['content_cut'] = df['content_cut'].map(lambda x: preprocessing.stop_words_cut(
+    df_content['content_cut'] = df_content['content_cut'].map(lambda x: preprocessing.get_words_by_flags(
+        x, flags=['n.*', '.*n', 'v.*', 's', 'j', 'l', 'i', 'eng']))
+    df_content['content_cut'] = df_content['content_cut'].map(lambda x: preprocessing.stop_words_cut(
         x, os.path.join(extra_dict_path, 'HIT_stop_words.txt')))
-    df['content_cut'] = df['content_cut'].map(lambda x: preprocessing.stop_words_cut(
+    df_content['content_cut'] = df_content['content_cut'].map(lambda x: preprocessing.stop_words_cut(
         x, os.path.join(extra_dict_path, 'self_stop_words.txt')))
-    df['content_cut'] = df['content_cut'].map(lambda x: preprocessing.disambiguation_cut(
+    df_content['content_cut'] = df_content['content_cut'].map(lambda x: preprocessing.disambiguation_cut(
         x, os.path.join(extra_dict_path, 'self_disambiguation_dict.json')))
-    return df
+    df_content['content_cut'] = df_content['content_cut'].map(lambda x: preprocessing.individual_character_cut(
+        x, os.path.join(extra_dict_path, 'self_individual_character_dict.txt')))
+    df_content['content_'] = df_content['content_cut'].map(lambda x: ' '.join(x))
+    return df_content
 
 
-def content_cluster(df, save=False):
-    df = content_preprocess(df)
-    matrix = modeling.feature_extraction(df['content_cut'], vectorizer='CountVectorizer',
-                                         vec_args={'max_df': 0.95, 'min_df': 1, 'max_features': None})
-    dbscan = modeling.get_cluster(matrix, cluster='DBSCAN',
-                                  cluster_args={'eps': 0.5, 'min_samples': 5, 'metric': 'cosine'})
+def content_cluster(df, df_save=False):
+    """按新闻内容聚类"""
+    df_content = df.copy()
+    df_content = content_preprocess(df_content)
+    word_library_list = counter.get_word_library(df_content['content_cut'])
+    single_frequency_words_list = counter.get_single_frequency_words(df_content['content_cut'])
+    max_features = len(word_library_list) - len(single_frequency_words_list) // 2
+    content_matrix = modeling.feature_extraction(df_content['content_'], vectorizer='CountVectorizer',
+                                                 vec_args={'max_df': 0.95, 'min_df': 1, 'max_features': max_features})
+    content_dbscan = modeling.get_cluster(content_matrix, cluster='DBSCAN',
+                                          cluster_args={'eps': 0.35, 'min_samples': 4, 'metric': 'cosine'})
+    content_labels = modeling.get_labels(content_dbscan)
+    df_content['content_label'] = content_labels
+    df_non_outliers = modeling.get_non_outliers_data(df_content, label_column='content_label')
+    content_label_num = counter.get_num_of_value_no_repeat(df_non_outliers['content_label'].tolist())
+    print('按新闻内容聚类，一共有%d个簇(不包括离群点)' % content_label_num)
+    content_rank = modeling.label2rank(content_labels)
+    df_content['content_rank'] = content_rank
+    for i in range(1, content_label_num + 1):
+        df_ = df_content[df_content['content_rank'] == i]
+        content_top_list = counter.get_most_common_words(df_['content_cut'], top_n=15, min_frequency=1)
+        print(content_top_list)
+    if df_save:
+        df_content.drop(['content_', 'content_label'], axis=1, inplace=True)
+        news_crawler.save_news(df_content, os.path.join(results_path, 'df_content_rank.csv'))
+    return df_content
 
-    labels = modeling.get_labels(dbscan)
-    df['content_label'] = labels
-    df_non_outliers = modeling.get_non_outliers_data(df, label_column='content_label')
-    labelnum = modeling.get_labelnum(df_non_outliers['content_label'].tolist())
-    print('一共有%d个簇(不包括离群点)' % labelnum)
-    content_rank = modeling.label2rank(labels)
-    df['content_rank'] = content_rank
-    for i in range(labelnum):
-        df1 = df[df['content_rank'] == i+1]
-        list1 = modeling.flat(df1['content_cut'].tolist())
-        modeling.list2wordcloud(list1, save_path=os.path.join(results_path, 'content_ranks', '%d.png' % (i+1)),
-                                font_path=os.path.join(fonts_path, '禹卫书法行书简体.ttf'))
-        top_list = modeling.get_most_common(df1['content_cut'], n=15)
-        print(top_list)
-    if save:
-        df.drop(['content1', 'content_cut', 'content_label'], axis=1, inplace=True)
-        news_crawler.save_news(df, os.path.join(results_path, 'df_content_rank.csv'))
-    return df
+
+def get_wordcloud(df, rank_column, text_list_column):
+    """
+    按照不同的簇生成每个簇的词云
+    :param df: pd.DataFrame，带有排名和分词后的文本列表数据
+    :param rank_column: 排名列名
+    :param text_list_column: 分词后的文本列表列名
+    """
+    df_non_outliers = modeling.get_non_outliers_data(df, label_column=rank_column)
+    label_num = counter.get_num_of_value_no_repeat(df_non_outliers[rank_column].tolist())
+    for i in range(1, label_num + 1):
+        df_ = df[df[rank_column] == i]
+        list_ = counter.flat(df_[text_list_column].tolist())
+        modeling.list2wordcloud(list_, save_path=os.path.join(results_path, rank_column, '%d.png' % i),
+                                font_path=os.path.join(fonts_path, 'yw.ttf'))
 
 
-def key_content(df, save=False):
-    def f(x):
-        x = preprocessing.clean_content(x)
-        x = modeling.key_sentences(x, num=1)
-        return x
+def key_content(df, df_save=False):
+    """获取摘要"""
+
+    def f(text):
+        text = preprocessing.clean_content(text)
+        text = modeling.get_key_sentences(text, num=1)
+        return text
+
     df['abstract'] = df['content'].map(f)
-    if save:
+    if df_save:
         df.drop(['content'], axis=1, inplace=True)
         news_crawler.save_news(df, os.path.join(results_path, 'df_abstract.csv'))
     return df
 
 
+def get_key_words():
+    df_title = news_crawler.load_news(os.path.join(results_path, 'df_title_rank.csv'))
+    df_content = news_crawler.load_news(os.path.join(results_path, 'df_content_rank.csv'))
+    df_title['title_cut'] = df_title['title_cut'].map(eval)
+    df_content['content_cut'] = df_content['content_cut'].map(eval)
+    df_title_content = df_title.copy()
+    df_title_content['content_cut'] = df_content['content_cut']
+    df_title_content['content_rank'] = df_content['content_rank']
+    df_title_content = modeling.get_non_outliers_data(df_title_content, label_column='title_rank')
+    title_rank_num = counter.get_num_of_value_no_repeat((df_title_content['title_rank']))
+    for i in range(1, title_rank_num + 1):
+        df_i = df_title_content[df_title_content['title_rank'] == i]
+        title = '\n'.join(df_i['title'].tolist())
+        title = modeling.get_key_sentences(title, num=1)
+        print('热点：', title)
+        content_rank = [k for k in df_i['content_rank']]
+        content_rank = set(content_rank)
+        for j in content_rank:
+            df_j = df_i[df_i['content_rank'] == j]
+            most_commmon_words = counter.get_most_common_words(df_j['content_cut'], top_n=20, min_frequency=5)
+            if len(most_commmon_words) > 0:
+                print('相关词汇：', most_commmon_words)
+
+
 def main():
-    import multiprocessing
-    my_crawler()
+    # # my_crawler()
     news_df = load_data()
     df = filter_data(news_df)
+    # title_cluster(df, True)
+    # content_cluster(df, True)
     p1 = multiprocessing.Process(target=title_cluster, args=(df, True))
     p2 = multiprocessing.Process(target=content_cluster, args=(df, True))
-    p3 = multiprocessing.Process(target=key_content, args=(df, True))
     p1.start()
     p2.start()
-    p3.start()
-    processes = [p1, p2, p3]
+    processes = [p1, p2]
     for p in processes:
         p.join()
+    get_key_words()
 
 
 if __name__ == '__main__':
